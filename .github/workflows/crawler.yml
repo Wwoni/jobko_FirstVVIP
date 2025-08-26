@@ -3,7 +3,7 @@ name: Crawl First VVIP
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: '0 21 * * *'  # 매일 06:00 KST (UTC 21:00)
+    - cron: '0 1 * * 1'  # 매주 월요일 10:00 KST (UTC 01:00)
 
 jobs:
   run:
@@ -30,5 +30,10 @@ jobs:
       #     echo "$GDRIVE_CREDENTIALS_DATA" | base64 -d > credentials.json
       #     echo "GDRIVE_CREDENTIALS_PATH=$PWD/credentials.json" >> $GITHUB_ENV
 
+      - name: Install deps
+        run: |
+         python -m pip install --upgrade pip
+         pip install -r requirements.txt
+      
       - name: Run crawler
         run: python jobko_FirstVVIP.py
