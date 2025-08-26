@@ -21,7 +21,7 @@ GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GDRIVE_FOLDER_ID')  # 필수
 GDRIVE_CREDENTIALS_DATA = os.environ.get('GDRIVE_CREDENTIALS_DATA')  # 선택(ENV JSON/BASE64)
 GDRIVE_CREDENTIALS_PATH = os.environ.get('GDRIVE_CREDENTIALS_PATH')  # 선택(파일 경로)
 
-CSV_FILE_NAME = 'jobkorea_postings.csv'
+CSV_FILE_NAME = 'jobkorea_FirstVVIP.csv'
 
 
 def _load_service_account_info():
