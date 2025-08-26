@@ -1,16 +1,17 @@
+# filename: jobko_FirstVVIP.py
 import os
 import io
 import re
 import json
+import html
 import base64
 from urllib.parse import urljoin
 from datetime import datetime
 
 import pandas as pd
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter, Retry
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -20,65 +21,39 @@ from googleapiclient.errors import HttpError
 # =========================
 # 설정값 (ENV 폴백 포함)
 # =========================
-CSV_FILE_NAME = 'jobkorea_FirstVVIP.csv'
 BASE_URL = "https://www.jobkorea.co.kr"
+CSV_FILE_NAME = 'jobkorea_FirstVVIP.csv'
 
 GOOGLE_DRIVE_FOLDER_ID = (
     os.environ.get('GDRIVE_FOLDER_ID')
-    or os.environ.get('GOOGLE_DRIVE_FOLDER_ID')   # 대체 키 허용
-    or os.environ.get('INPUT_GDRIVE_FOLDER_ID')   # workflow_dispatch inputs 호환
+    or os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
+    or os.environ.get('INPUT_GDRIVE_FOLDER_ID')
 )
-
 GDRIVE_CREDENTIALS_DATA = (
     os.environ.get('GDRIVE_CREDENTIALS_DATA')
-    or os.environ.get('INPUT_GDRIVE_CREDENTIALS_DATA')   # inputs 호환
+    or os.environ.get('INPUT_GDRIVE_CREDENTIALS_DATA')
 )
-
 GDRIVE_CREDENTIALS_PATH = os.environ.get('GDRIVE_CREDENTIALS_PATH')
-GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')  # 표준 변수도 폴백
-
+GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
 
 # =========================
-# 유틸
+# 공통 유틸
 # =========================
-def _norm(t: str) -> str:
-    """HTML 엔티티 해제 + 공백 정리"""
-    import html as ihtml
-    t = ihtml.unescape(t or "")
-    return re.sub(r"\s+", " ", t.strip())
+def _fix_url(u: str, base: str = BASE_URL) -> str:
+    if not u:
+        return u
+    u = u.strip()
+    if u.startswith('//'):
+        return 'https:' + u
+    if u.startswith('/'):
+        return urljoin(base, u)
+    return u
 
-
-def _to_abs(url: str) -> str:
-    if not url:
-        return ""
-    if url.startswith("//"):
-        return "https:" + url
-    return urljoin(BASE_URL, url)
-
-
-def _build_session() -> requests.Session:
-    """재시도/헤더 설정된 세션"""
-    s = requests.Session()
-    retries = Retry(
-        total=5,
-        connect=5,
-        read=5,
-        backoff_factor=0.6,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"]
-    )
-    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    })
-    return s
-
+def _text(node) -> str:
+    """<br>를 공백으로 보존하며 텍스트 추출"""
+    if not node:
+        return ''
+    return node.get_text(" ", strip=True)
 
 # =========================
 # 자격증명 로더
@@ -89,27 +64,22 @@ def _load_service_account_info():
     1) GDRIVE_CREDENTIALS_DATA (JSON → 실패 시 base64 → 실패 시 literal_eval)
     2) 파일 경로(GDRIVE_CREDENTIALS_PATH, GOOGLE_APPLICATION_CREDENTIALS, ./credentials.json)
     """
-    # 1) ENV
     if GDRIVE_CREDENTIALS_DATA:
-        # JSON 시도
         try:
             return json.loads(GDRIVE_CREDENTIALS_DATA)
         except json.JSONDecodeError:
             pass
-        # base64 → JSON 시도
         try:
             decoded = base64.b64decode(GDRIVE_CREDENTIALS_DATA).decode('utf-8')
             return json.loads(decoded)
         except Exception:
             pass
-        # literal_eval 마지막 시도
         try:
             import ast
             return ast.literal_eval(GDRIVE_CREDENTIALS_DATA)
         except Exception as e:
             raise RuntimeError("GDRIVE_CREDENTIALS_DATA 파싱 실패(JSON 또는 base64(JSON) 필요).") from e
 
-    # 2) 파일 경로 폴백
     candidate_paths = []
     if GDRIVE_CREDENTIALS_PATH:
         candidate_paths.append(GDRIVE_CREDENTIALS_PATH)
@@ -124,7 +94,6 @@ def _load_service_account_info():
                 raise FileNotFoundError(f"자격증명 파일이 비어있습니다: {p}")
             with open(p, 'r', encoding='utf-8') as f:
                 s = f.read().strip()
-            # 파일 내용이 base64일 수도 있음
             try:
                 if s and not s.lstrip().startswith('{'):
                     decoded = base64.b64decode(s).decode('utf-8')
@@ -142,7 +111,6 @@ def _load_service_account_info():
         "GDRIVE_CREDENTIALS_PATH/GOOGLE_APPLICATION_CREDENTIALS/credentials.json을 제공하세요."
     )
 
-
 # =========================
 # Google Drive 서비스
 # =========================
@@ -156,7 +124,6 @@ def get_gdrive_service():
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     drive = build('drive', 'v3', credentials=creds)
     return drive
-
 
 def _assert_folder_access(drive, folder_id):
     """폴더가 보이는지/폴더가 맞는지/어느 드라이브인지 확인하고 driveId 반환"""
@@ -179,83 +146,130 @@ def _assert_folder_access(drive, folder_id):
     print(f"업로드 대상 폴더 확인: {meta.get('name')} (driveId={meta.get('driveId')})")
     return meta.get("driveId")
 
-
 # =========================
-# HTML 파싱 (Requests + BeautifulSoup)
+# 크롤러 (requests + BeautifulSoup)
 # =========================
-def _parse_first_vvip_html(html: str) -> pd.DataFrame:
-    """First VVIP 섹션 HTML 문자열을 받아 DataFrame으로 변환"""
-    soup = BeautifulSoup(html, "lxml")
-    sec = soup.select_one("#Prdt_BnnrFirstVVIP")
-    if not sec:
-        return pd.DataFrame()
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 
-    items = sec.select("ul.list_firstvvip li")
+def _new_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    retries = Retry(
+        total=3,
+        backoff_factor=0.8,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "HEAD"])
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.mount("http://", HTTPAdapter(max_retries=retries))
+    return s
+
+def _extract_company_from_onclick(li) -> str | None:
+    """
+    카드 내 btnScrap의 onclick 마지막 리터럴에서
+    '_회사명_공고제목...' 형태를 파싱하여 회사명 추출
+    """
+    btn = li.select_one('button.btnScrap')
+    if not btn:
+        return None
+    onclick = btn.get('onclick') or ''
+    literals = re.findall(r"'([^']*)'", onclick)
+    if not literals:
+        return None
+    payload = html.unescape(literals[-1])  # "_회사명_제목..."
+    payload = payload.replace('<BR>', ' ').replace('&lt;BR&gt;', ' ').lstrip('_').strip()
+    if '_' in payload:
+        company = payload.split('_', 1)[0].strip()
+        return company or None
+    return None
+
+def _fetch_company_from_detail(session: requests.Session, job_url: str) -> str | None:
+    """상세 페이지에서 회사명 폴백 추출"""
+    if not job_url:
+        return None
+    try:
+        res = session.get(_fix_url(job_url), timeout=15)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, 'lxml')
+        # 여러 케이스를 넓게 커버
+        cand = (
+            soup.select_one('.coName a') or
+            soup.select_one('.coTit a') or
+            soup.select_one('a.coLink') or
+            soup.select_one('.company .name') or
+            soup.select_one('meta[property="og:site_name"]')
+        )
+        if cand:
+            return (cand.get_text(strip=True)
+                    if hasattr(cand, 'get_text')
+                    else cand.get('content', '').strip()) or None
+    except Exception:
+        pass
+    return None
+
+def scrape_job_postings() -> pd.DataFrame:
+    """잡코리아 'First VVIP' 섹션 크롤링"""
+    session = _new_session()
+
+    # 1) 메인 페이지 로드
+    resp = session.get(BASE_URL + '/', timeout=20)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, 'lxml')
+
+    # 2) First VVIP 섹션 선택
+    section = soup.select_one('#Prdt_BnnrFirstVVIP')
+    if not section:
+        raise RuntimeError("First VVIP 섹션(#Prdt_BnnrFirstVVIP)을 찾지 못했습니다. 마크업이 변경되었을 수 있습니다.")
+
+    items = section.select('ul.list_firstvvip > li')
+    if not items:
+        print("경고: list_firstvvip 항목이 비었습니다.")
     data = []
 
     for li in items:
-        a = li.select_one("a.card-wrap")
-        job_url = _to_abs(a.get("href")) if a else "No URL"
+        # 공고 URL (카드 전체 a)
+        a = li.select_one('a.card-wrap')
+        job_url = _fix_url(a.get('href') if a else '') or 'No URL'
 
-        desc_el = li.select_one("div.description")
-        job_title = _norm(desc_el.get_text(" ")) if desc_el else "No Title"
+        # 제목
+        title = _text(li.select_one('div.description')) or 'No Title'
 
-        sum_el = li.select_one("div.addition div.summary")
-        job_summary = _norm(sum_el.get_text(" ")) if sum_el else "No Summary"
+        # 요약
+        summary = _text(li.select_one('div.addition div.summary')) or 'No Summary'
 
-        dday_el = li.select_one("div.extra .dday")
-        dday = _norm(dday_el.get_text(" ")) if dday_el else "No D-Day"
+        # D-Day
+        dday_node = li.select_one('div.extra .dday')
+        dday = _text(dday_node) or 'No D-Day'
 
-        logo_img = li.select_one("span.logo img")
-        logo_url = _to_abs(logo_img.get("src") or logo_img.get("data-src") or "") if logo_img else "No Logo URL"
+        # 로고 URL
+        logo_img = li.select_one('span.logo img')
+        logo_url = _fix_url(logo_img.get('src')) if logo_img and logo_img.get('src') else 'No Logo URL'
 
-        # 회사명: 스크랩 버튼 onclick → 실패시 로고 alt
-        company_name = ""
-        scrap_btn = li.select_one(".btnScrap")
-        if scrap_btn and scrap_btn.has_attr("onclick"):
-            onclick = scrap_btn["onclick"]
-            m = re.search(r"'_(.+?)_'", onclick)
-            if m:
-                company_name = _norm(m.group(1))
-        if not company_name and logo_img:
-            company_name = _norm(logo_img.get("alt"))
-        if not company_name:
-            company_name = "No Company Name"
+        # 회사명 (onclick → 실패 시 상세 페이지 폴백)
+        company = _extract_company_from_onclick(li)
+        if not company and job_url and job_url != 'No URL':
+            company = _fetch_company_from_detail(session, job_url)
+        if not company:
+            company = 'No Company Name'
 
         data.append({
-            "Company Name": company_name,
-            "Logo URL": logo_url,
-            "Job Title": job_title,
-            "Job Summary": job_summary,
-            "D-Day": dday,
-            "Job URL": job_url,
-            "Scraped Date": datetime.now().strftime("%Y-%m-%d")
+            'Company Name': company,
+            'Logo URL': logo_url,
+            'Job Title': title,
+            'Job Summary': summary,
+            'D-Day': dday,
+            'Job URL': job_url,
+            'Scraped Date': datetime.now().strftime("%Y-%m-%d")
         })
 
+    print(f"총 {len(data)}개의 채용 공고를 수집했습니다.")
     return pd.DataFrame(data)
-
-
-# =========================
-# 크롤러 (Requests만 사용)
-# =========================
-def scrape_job_postings() -> pd.DataFrame:
-    """잡코리아 'First VVIP' 섹션 크롤링"""
-    session = _build_session()
-    resp = session.get(BASE_URL + "/", timeout=30)
-    resp.raise_for_status()
-
-    df = _parse_first_vvip_html(resp.text)
-
-    if df.empty:
-        # 디버깅 편의를 위해 일부 저장(선택)
-        with open("jobkorea_home_debug.html", "w", encoding="utf-8") as f:
-            f.write(resp.text)
-        print("경고: First VVIP 섹션을 찾지 못했습니다. 'jobkorea_home_debug.html'로 원본 저장.")
-    else:
-        print(f"총 {len(df)}개의 채용 공고를 수집했습니다.")
-
-    return df
-
 
 # =========================
 # 메인
@@ -272,10 +286,10 @@ def main():
         q=query,
         spaces='drive',
         fields='files(id, name)',
-        includeItemsFromAllDrives=True,   # ✅ 공유 드라이브 검색 포함
-        supportsAllDrives=True,           # ✅ 공유 드라이브 지원
-        corpora='drive',                  # ✅ 현재 드라이브 한정
-        driveId=drive_id                  # ✅ 대상 드라이브 지정
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        corpora='drive',
+        driveId=drive_id
     ).execute()
     files = resp.get('files', [])
 
@@ -313,7 +327,7 @@ def main():
         drive.files().update(
             fileId=file_id,
             media_body=media_body,
-            supportsAllDrives=True        # ✅ 공유 드라이브 지원
+            supportsAllDrives=True
         ).execute()
         print(f"파일 ID {file_id} 업데이트 완료.")
     else:
@@ -322,10 +336,9 @@ def main():
             body=file_metadata,
             media_body=media_body,
             fields='id',
-            supportsAllDrives=True        # ✅ 공유 드라이브 지원
+            supportsAllDrives=True
         ).execute()
         print(f"폴더 {GOOGLE_DRIVE_FOLDER_ID}에 새 파일 업로드 완료 (ID: {created.get('id')}).")
-
 
 if __name__ == '__main__':
     main()
