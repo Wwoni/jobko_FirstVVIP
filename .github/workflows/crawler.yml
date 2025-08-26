@@ -8,7 +8,12 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+         GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+         # 둘 중 하나만 설정하세요 ↓
+         # 1) JSON 원문을 시크릿에 저장했다면:
+         # GDRIVE_CREDENTIALS_DATA: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
+         # 2) base64로 인코딩해 저장했다면:
+         GDRIVE_CREDENTIALS_DATA: ${{ secrets.GDRIVE_CREDENTIALS_DATA_B64 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
