@@ -36,4 +36,4 @@ jobs:
           test -n "$GDRIVE_FOLDER_ID" && echo "FOLDER_ID length: ${#GDRIVE_FOLDER_ID}" || echo "FOLDER_ID EMPTY"
 
       - name: Run crawler
-        run: python python jobko_FirstVVIP.py
+        run: python jobko_FirstVVIP.py
