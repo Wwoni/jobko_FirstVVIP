@@ -1,7 +1,9 @@
 import os
 import io
+import re
 import json
 import base64
+from urllib.parse import urljoin
 import pandas as pd
 from datetime import datetime
 
@@ -36,6 +38,20 @@ GDRIVE_CREDENTIALS_DATA = (
 GDRIVE_CREDENTIALS_PATH = os.environ.get('GDRIVE_CREDENTIALS_PATH')
 GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')  # 표준 변수도 폴백
 
+BASE_URL = "https://www.jobkorea.co.kr"
+
+# =========================
+# 유틸
+# =========================
+def _norm(t: str) -> str:
+    return re.sub(r"\s+", " ", (t or "").strip())
+
+def _to_abs(url: str) -> str:
+    if not url:
+        return ""
+    if url.startswith("//"):
+        return "https:" + url
+    return urljoin(BASE_URL, url)
 
 # =========================
 # 자격증명 로더
@@ -141,7 +157,7 @@ def _assert_folder_access(drive, folder_id):
 # 크롤러
 # =========================
 def scrape_job_postings():
-    """잡코리아 'First VVIP' 섹션 크롤링"""
+    """잡코리아 'First VVIP' 섹션 크롤링 (선택자/정규식/URL 절대경로 개선)"""
     chrome_service = ChromeService(ChromeDriverManager().install())
     options = webdriver.ChromeOptions()
     options.add_argument('--headless=new')  # 최신 헤드리스
@@ -149,81 +165,111 @@ def scrape_job_postings():
     options.add_argument('--disable-dev-shm-usage')
     driver = webdriver.Chrome(service=chrome_service, options=options)
 
-    driver.get('https://www.jobkorea.co.kr/')
-    wait = WebDriverWait(driver, 20)
-
-    # 팝업 닫기 (있을 때만)
     try:
-        popup_close_button = wait.until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), '오늘 하루 안보기')]"))
-        )
-        popup_close_button.click()
-        print("팝업을 닫았습니다.")
-    except Exception:
-        print("팝업이 없거나 닫지 못했지만 계속 진행합니다.")
+        driver.get(BASE_URL + '/')
+        wait = WebDriverWait(driver, 20)
 
-    # First VVIP 섹션
-    first_vvip_section = wait.until(EC.presence_of_element_located((By.ID, 'Prdt_BnnrFirstVVIP')))
-    list_items = first_vvip_section.find_elements(By.CSS_SELECTOR, 'ul.list_firstvvip li')
-
-    data = []
-    for item in list_items:
-        # 회사명
+        # 팝업 닫기 (있을 때만)
         try:
-            company_name = item.find_element(By.CSS_SELECTOR, 'span.name a').text.strip()
-        except:
+            popup_close_button = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), '오늘 하루 안보기')]"))
+            )
+            popup_close_button.click()
+            print("팝업을 닫았습니다.")
+        except Exception:
+            print("팝업이 없거나 닫지 못했지만 계속 진행합니다.")
+
+        # First VVIP 섹션
+        first_vvip_section = wait.until(EC.presence_of_element_located((By.ID, 'Prdt_BnnrFirstVVIP')))
+        list_items = first_vvip_section.find_elements(By.CSS_SELECTOR, 'ul.list_firstvvip li')
+
+        data = []
+        for item in list_items:
+            # 공통 앵커 (모든 카드 래핑)
             try:
-                company_name = item.find_element(By.CSS_SELECTOR, 'span.logo img').get_attribute('alt').strip()
-            except:
-                company_name = 'No Company Name'
+                a = item.find_element(By.CSS_SELECTOR, 'a.card-wrap')
+            except Exception:
+                a = None
 
-        # 로고 URL
-        try:
-            logo_url = item.find_element(By.CSS_SELECTOR, 'span.logo img').get_attribute('src').strip()
-        except:
-            logo_url = 'No Logo URL'
+            # 채용 공고 URL (절대경로)
+            job_url = ''
+            if a:
+                job_url = _to_abs(a.get_attribute('href') or '')
 
-        # 채용 공고 제목
-        try:
-            job_title = item.find_element(By.CSS_SELECTOR, 'div.description a').text.strip()
-        except:
-            job_title = 'No Title'
-
-        # 채용 공고 요약
-        try:
-            job_summary = item.find_element(By.CSS_SELECTOR, 'div.addition div.summary').text.strip()
-        except:
-            job_summary = 'No Summary'
-
-        # 마감일
-        try:
-            dday = item.find_element(By.CSS_SELECTOR, 'div.extra .dday').text.strip()
-        except:
-            dday = 'No D-Day'
-
-        # 채용 공고 URL
-        job_url = 'No URL'
-        try:
-            job_url = item.find_element(By.CSS_SELECTOR, 'div.description a').get_attribute('href')
-        except:
+            # 제목: .description 텍스트(줄바꿈 공백화)
             try:
-                job_url = item.find_element(By.CSS_SELECTOR, 'a.card-wrap').get_attribute('href')
-            except:
+                desc_el = item.find_element(By.CSS_SELECTOR, 'div.description')
+                job_title = _norm(desc_el.get_attribute('innerText') or desc_el.text)
+            except Exception:
+                job_title = 'No Title'
+
+            # 요약
+            try:
+                sum_el = item.find_element(By.CSS_SELECTOR, 'div.addition div.summary')
+                job_summary = _norm(sum_el.get_attribute('innerText') or sum_el.text)
+            except Exception:
+                job_summary = 'No Summary'
+
+            # 마감일 (상시채용/오늘시작 포함)
+            try:
+                dday_el = item.find_element(By.CSS_SELECTOR, 'div.extra .dday')
+                dday = _norm(dday_el.text)
+            except Exception:
+                dday = 'No D-Day'
+
+            # 로고 URL (lazy 대응: src 또는 data-src)
+            try:
+                logo_img = item.find_element(By.CSS_SELECTOR, 'span.logo img')
+                logo_url = _to_abs(logo_img.get_attribute('src') or logo_img.get_attribute('data-src') or '')
+            except Exception:
+                logo_url = 'No Logo URL'
+
+            # 회사명: btnScrap의 onclick에서 추출 ➜ 실패 시 로고 alt 보조
+            company_name = ''
+            try:
+                scrap_btn = item.find_element(By.CSS_SELECTOR, '.btnScrap')
+                onclick = scrap_btn.get_attribute('onclick') or ''
+                # 패턴: "... + '_회사명_공고제목');"
+                m = re.search(r"\+\s*'_(.+?)_'", onclick)
+                if not m:
+                    m = re.search(r"'_(.+?)_'", onclick)
+                if m:
+                    company_name = _norm(m.group(1))
+            except Exception:
                 pass
 
-        data.append({
-            'Company Name': company_name,
-            'Logo URL': logo_url,
-            'Job Title': job_title,
-            'Job Summary': job_summary,
-            'D-Day': dday,
-            'Job URL': job_url,
-            'Scraped Date': datetime.now().strftime("%Y-%m-%d")
-        })
+            if not company_name:
+                try:
+                    logo_img = item.find_element(By.CSS_SELECTOR, 'span.logo img')
+                    company_name = _norm(logo_img.get_attribute('alt'))
+                except Exception:
+                    pass
 
-    driver.quit()
-    print(f"총 {len(data)}개의 채용 공고를 수집했습니다.")
-    return pd.DataFrame(data)
+            if not company_name:
+                company_name = 'No Company Name'
+
+            if not job_url:
+                # 폴백: description 안에 a가 있는 경우(거의 없음)
+                try:
+                    job_url = _to_abs(item.find_element(By.CSS_SELECTOR, 'div.description a').get_attribute('href'))
+                except Exception:
+                    job_url = 'No URL'
+
+            data.append({
+                'Company Name': company_name,
+                'Logo URL': logo_url,
+                'Job Title': job_title,
+                'Job Summary': job_summary,
+                'D-Day': dday,
+                'Job URL': job_url,
+                'Scraped Date': datetime.now().strftime("%Y-%m-%d")
+            })
+
+        print(f"총 {len(data)}개의 채용 공고를 수집했습니다.")
+        return pd.DataFrame(data)
+
+    finally:
+        driver.quit()
 
 
 # =========================
@@ -298,3 +344,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
