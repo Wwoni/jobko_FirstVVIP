@@ -40,5 +40,13 @@ jobs:
           test -n "$GDRIVE_CREDENTIALS_PATH" && echo "CRED_PATH OK" || echo "CRED_PATH EMPTY"
           test -n "$GDRIVE_FOLDER_ID" && echo "FOLDER_ID length: ${#GDRIVE_FOLDER_ID}" || echo "FOLDER_ID EMPTY"
 
+      - name: Write service account JSON to file
+        run: |
+          set -euo pipefail
+          printf '%s' "${{ secrets.GDRIVE_CREDENTIALS_JSON }}" > credentials.json
+          test -s credentials.json
+          jq -e . credentials.json >/dev/null
+          echo "GDRIVE_CREDENTIALS_PATH=$PWD/credentials.json" >> $GITHUB_ENV
+
       - name: Run crawler
         run: python jobko_FirstVVIP.py
