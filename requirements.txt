@@ -1,4 +1,6 @@
-selenium>=4.20.0
+requests
+beautifulsoup4
+lxml
 webdriver-manager>=4.0.1
 pandas
 google-api-python-client
