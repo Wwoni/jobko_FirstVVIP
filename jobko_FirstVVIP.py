@@ -41,33 +41,28 @@ GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'
 
 def _load_service_account_info():
     """
-    서비스 계정 정보를 다음 우선순위로 로드
-    1) 환경변수 GDRIVE_CREDENTIALS_DATA (JSON → 실패 시 base64 → 실패 시 literal_eval)
+    우선순위
+    1) GDRIVE_CREDENTIALS_DATA (JSON → 실패시 base64 → 실패시 literal_eval)
     2) 파일 경로(GDRIVE_CREDENTIALS_PATH, GOOGLE_APPLICATION_CREDENTIALS, ./credentials.json)
     """
-    # 1) ENV – JSON 직파싱
+    # 1) ENV
     if GDRIVE_CREDENTIALS_DATA:
-        # JSON 시도
         try:
             return json.loads(GDRIVE_CREDENTIALS_DATA)
         except json.JSONDecodeError:
             pass
-        # base64 → JSON 시도
         try:
             decoded = base64.b64decode(GDRIVE_CREDENTIALS_DATA).decode('utf-8')
             return json.loads(decoded)
         except Exception:
             pass
-        # literal_eval 마지막 시도
         try:
             import ast
             return ast.literal_eval(GDRIVE_CREDENTIALS_DATA)
         except Exception as e:
-            raise RuntimeError(
-                "GDRIVE_CREDENTIALS_DATA 파싱 실패. JSON 또는 base64(JSON) 형태를 사용하세요."
-            ) from e
+            raise RuntimeError("GDRIVE_CREDENTIALS_DATA 파싱 실패(JSON 또는 base64(JSON) 필요).") from e
 
-    # 2) 파일 경로 폴백
+    # 2) 파일
     candidate_paths = []
     if GDRIVE_CREDENTIALS_PATH:
         candidate_paths.append(GDRIVE_CREDENTIALS_PATH)
@@ -77,13 +72,27 @@ def _load_service_account_info():
 
     for p in candidate_paths:
         if p and os.path.exists(p):
+            size = os.path.getsize(p)
+            if size == 0:
+                raise FileNotFoundError(f"자격증명 파일이 비어있습니다: {p}")
             with open(p, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                s = f.read().strip()
+            # 파일 내용이 base64일 수도 있음
+            try:
+                if s and not s.lstrip().startswith('{'):
+                    decoded = base64.b64decode(s).decode('utf-8')
+                    return json.loads(decoded)
+                return json.loads(s)
+            except Exception as e:
+                raise RuntimeError(
+                    f"자격증명 파일이 올바른 JSON이 아닙니다: {p} "
+                    f"(base64를 파일에 넣었으면 디코드하거나 ENV로 넘겨주세요)"
+                ) from e
 
     raise FileNotFoundError(
         "서비스 계정 자격증명을 찾을 수 없습니다. "
         "GDRIVE_CREDENTIALS_DATA(ENV, JSON/BASE64) 또는 "
-        "GDRIVE_CREDENTIALS_PATH/GOOGLE_APPLICATION_CREDENTIALS/credentials.json 파일을 제공하세요."
+        "GDRIVE_CREDENTIALS_PATH/GOOGLE_APPLICATION_CREDENTIALS/credentials.json을 제공하세요."
     )
 
 
