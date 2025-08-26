@@ -24,16 +24,30 @@ GDRIVE_CREDENTIALS_PATH = os.environ.get('GDRIVE_CREDENTIALS_PATH')  # 선택(�
 CSV_FILE_NAME = 'jobkorea_FirstVVIP.csv'
 
 
+# --- 설정 ---
+GOOGLE_DRIVE_FOLDER_ID = (
+    os.environ.get('GDRIVE_FOLDER_ID')
+    or os.environ.get('GOOGLE_DRIVE_FOLDER_ID')      # 대체 변수명 허용
+    or os.environ.get('INPUT_GDRIVE_FOLDER_ID')      # workflow_dispatch inputs 호환
+)
+
+GDRIVE_CREDENTIALS_DATA = (
+    os.environ.get('GDRIVE_CREDENTIALS_DATA')
+    or os.environ.get('INPUT_GDRIVE_CREDENTIALS_DATA')   # inputs 호환
+)
+
+GDRIVE_CREDENTIALS_PATH = os.environ.get('GDRIVE_CREDENTIALS_PATH')
+GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')  # 표준 변수도 폴백
+
 def _load_service_account_info():
     """
     서비스 계정 정보를 다음 우선순위로 로드
-    1) 환경변수 GDRIVE_CREDENTIALS_DATA (JSON 문자열 → 실패 시 base64 → 실패 시 literal_eval)
-    2) 환경변수 GDRIVE_CREDENTIALS_PATH 경로의 파일
-    3) 로컬 'credentials.json' 파일
+    1) 환경변수 GDRIVE_CREDENTIALS_DATA (JSON → 실패 시 base64 → 실패 시 literal_eval)
+    2) 파일 경로(GDRIVE_CREDENTIALS_PATH, GOOGLE_APPLICATION_CREDENTIALS, ./credentials.json)
     """
     # 1) ENV – JSON 직파싱
     if GDRIVE_CREDENTIALS_DATA:
-        # 먼저 JSON 시도
+        # JSON 시도
         try:
             return json.loads(GDRIVE_CREDENTIALS_DATA)
         except json.JSONDecodeError:
@@ -44,31 +58,34 @@ def _load_service_account_info():
             return json.loads(decoded)
         except Exception:
             pass
-        # 마지막 안전 대안: literal_eval
+        # literal_eval 마지막 시도
         try:
             import ast
             return ast.literal_eval(GDRIVE_CREDENTIALS_DATA)
         except Exception as e:
             raise RuntimeError(
-                "GDRIVE_CREDENTIALS_DATA를 파싱할 수 없습니다. JSON(또는 base64 인코딩된 JSON)을 사용하세요."
+                "GDRIVE_CREDENTIALS_DATA 파싱 실패. JSON 또는 base64(JSON) 형태를 사용하세요."
             ) from e
 
-    # 2) 파일 경로
+    # 2) 파일 경로 폴백
     candidate_paths = []
     if GDRIVE_CREDENTIALS_PATH:
         candidate_paths.append(GDRIVE_CREDENTIALS_PATH)
+    if GOOGLE_APPLICATION_CREDENTIALS:
+        candidate_paths.append(GOOGLE_APPLICATION_CREDENTIALS)
     candidate_paths.append('credentials.json')
 
     for p in candidate_paths:
-        if os.path.exists(p):
+        if p and os.path.exists(p):
             with open(p, 'r', encoding='utf-8') as f:
                 return json.load(f)
 
     raise FileNotFoundError(
         "서비스 계정 자격증명을 찾을 수 없습니다. "
-        "GDRIVE_CREDENTIALS_DATA 환경변수(JSON/BASE64)나 "
-        "GDRIVE_CREDENTIALS_PATH/credentials.json 파일을 제공하세요."
+        "GDRIVE_CREDENTIALS_DATA(ENV, JSON/BASE64) 또는 "
+        "GDRIVE_CREDENTIALS_PATH/GOOGLE_APPLICATION_CREDENTIALS/credentials.json 파일을 제공하세요."
     )
+
 
 
 def get_gdrive_service():
