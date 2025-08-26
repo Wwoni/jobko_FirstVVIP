@@ -2,7 +2,11 @@ name: Crawl First VVIP
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: '0 21 * * *'  # 매일 06:00 KST
+    - cron: '0 1 * * 1'  # 매주 월요일 10:00 KST
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   run:
@@ -48,17 +52,14 @@ jobs:
           jq -e . credentials.json >/dev/null
           echo "GDRIVE_CREDENTIALS_PATH=$PWD/credentials.json" >> $GITHUB_ENV
 
-      - name: Debug credentials file status
+      - name: Decode service account to file
+        shell: bash
         run: |
-          set -euo pipefail
-          if [ -n "${GDRIVE_CREDENTIALS_PATH:-}" ] && [ -f "$GDRIVE_CREDENTIALS_PATH" ]; then
-              echo "CRED_PATH=$GDRIVE_CREDENTIALS_PATH"
-              echo -n "size(bytes)="
-              wc -c < "$GDRIVE_CREDENTIALS_PATH"
-              head -c 1 "$GDRIVE_CREDENTIALS_PATH" | od -An -t x1
-          else
-              echo "No credentials file path set."
-          fi
+          set -Eeuo pipefail
+          echo "${{ secrets.GDRIVE_CREDENTIALS_DATA_B64 }}" | base64 -d > credentials.json
+          test -s credentials.json
+          jq -e . credentials.json >/dev/null
+          echo "GDRIVE_CREDENTIALS_PATH=$PWD/credentials.json" >> $GITHUB_ENV
       
       - name: Run crawler
         run: python jobko_FirstVVIP.py
