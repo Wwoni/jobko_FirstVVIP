@@ -19,41 +19,38 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from googleapiclient.errors import HttpError
 
 # =========================
-# 설정값 (ENV 폴백 포함)
+# 설정값
 # =========================
 BASE_URL = "https://www.jobkorea.co.kr"
-CSV_FILE_NAME = 'jobkorea_FirstVVIP.csv'
+CSV_FILE_NAME = "jobkorea_FirstVVIP.csv"
 
 GOOGLE_DRIVE_FOLDER_ID = (
-    os.environ.get('GDRIVE_FOLDER_ID')
-    or os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
-    or os.environ.get('INPUT_GDRIVE_FOLDER_ID')
+    os.environ.get("GDRIVE_FOLDER_ID")
+    or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    or os.environ.get("INPUT_GDRIVE_FOLDER_ID")
 )
 GDRIVE_CREDENTIALS_DATA = (
-    os.environ.get('GDRIVE_CREDENTIALS_DATA')
-    or os.environ.get('INPUT_GDRIVE_CREDENTIALS_DATA')
+    os.environ.get("GDRIVE_CREDENTIALS_DATA")
+    or os.environ.get("INPUT_GDRIVE_CREDENTIALS_DATA")
 )
-GDRIVE_CREDENTIALS_PATH = os.environ.get('GDRIVE_CREDENTIALS_PATH')
-GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+GDRIVE_CREDENTIALS_PATH = os.environ.get("GDRIVE_CREDENTIALS_PATH")
+GOOGLE_APPLICATION_CREDENTIALS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
 # =========================
-# 공통 유틸
+# 유틸
 # =========================
 def _fix_url(u: str, base: str = BASE_URL) -> str:
     if not u:
         return u
     u = u.strip()
-    if u.startswith('//'):
-        return 'https:' + u
-    if u.startswith('/'):
+    if u.startswith("//"):
+        return "https:" + u
+    if u.startswith("/"):
         return urljoin(base, u)
     return u
 
 def _text(node) -> str:
-    """<br>를 공백으로 보존하며 텍스트 추출"""
-    if not node:
-        return ''
-    return node.get_text(" ", strip=True)
+    return node.get_text(" ", strip=True) if node else ""
 
 # =========================
 # 자격증명 로더
@@ -65,7 +62,7 @@ def _load_service_account_info():
         except json.JSONDecodeError:
             pass
         try:
-            decoded = base64.b64decode(GDRIVE_CREDENTIALS_DATA).decode('utf-8')
+            decoded = base64.b64decode(GDRIVE_CREDENTIALS_DATA).decode("utf-8")
             return json.loads(decoded)
         except Exception:
             pass
@@ -80,18 +77,17 @@ def _load_service_account_info():
         candidate_paths.append(GDRIVE_CREDENTIALS_PATH)
     if GOOGLE_APPLICATION_CREDENTIALS:
         candidate_paths.append(GOOGLE_APPLICATION_CREDENTIALS)
-    candidate_paths.append('credentials.json')
+    candidate_paths.append("credentials.json")
 
     for p in candidate_paths:
         if p and os.path.exists(p):
-            size = os.path.getsize(p)
-            if size == 0:
+            if os.path.getsize(p) == 0:
                 raise FileNotFoundError(f"자격증명 파일이 비어있습니다: {p}")
-            with open(p, 'r', encoding='utf-8') as f:
+            with open(p, "r", encoding="utf-8") as f:
                 s = f.read().strip()
             try:
-                if s and not s.lstrip().startswith('{'):
-                    decoded = base64.b64decode(s).decode('utf-8')
+                if s and not s.lstrip().startswith("{"):
+                    decoded = base64.b64decode(s).decode("utf-8")
                     return json.loads(decoded)
                 return json.loads(s)
             except Exception as e:
@@ -102,7 +98,7 @@ def _load_service_account_info():
 
     raise FileNotFoundError(
         "서비스 계정 자격증명을 찾을 수 없습니다. "
-        "GDRIVE_CREDENTIALS_DATA(ENV, JSON/BASE64) 또는 "
+        "GDRIVE_CREDENTIALS_DATA(ENV) 또는 "
         "GDRIVE_CREDENTIALS_PATH/GOOGLE_APPLICATION_CREDENTIALS/credentials.json을 제공하세요."
     )
 
@@ -111,24 +107,20 @@ def _load_service_account_info():
 # =========================
 def get_gdrive_service():
     if not GOOGLE_DRIVE_FOLDER_ID:
-        raise ValueError("GDRIVE_FOLDER_ID 환경변수가 설정되어 있지 않습니다. 업로드 대상 폴더 ID를 지정하세요.")
-    scopes = ['https://www.googleapis.com/auth/drive']
+        raise ValueError("GDRIVE_FOLDER_ID 환경변수가 비어 있습니다.")
+    scopes = ["https://www.googleapis.com/auth/drive"]
     info = _load_service_account_info()
     creds = Credentials.from_service_account_info(info, scopes=scopes)
-    drive = build('drive', 'v3', credentials=creds)
-    return drive
+    return build("drive", "v3", credentials=creds)
 
 def _assert_folder_access(drive, folder_id):
     try:
         meta = drive.files().get(
-            fileId=folder_id, fields="id, name, mimeType, driveId", supportsAllDrives=True
+            fileId=folder_id, fields="id,name,mimeType,driveId", supportsAllDrives=True
         ).execute()
     except HttpError as e:
         if e.resp.status == 404:
-            raise ValueError(
-                "지정한 GDRIVE_FOLDER_ID 폴더를 찾을 수 없습니다. "
-                "➜ 폴더 ID 확인 및 서비스계정에 권한(공유 드라이브 구성원) 부여 필요."
-            )
+            raise ValueError("GDRIVE_FOLDER_ID 폴더를 찾지 못했습니다. 권한/ID를 확인하세요.")
         raise
     if meta.get("mimeType") != "application/vnd.google-apps.folder":
         raise ValueError(f"GDRIVE_FOLDER_ID가 폴더가 아닙니다: {meta.get('mimeType')}")
@@ -136,7 +128,7 @@ def _assert_folder_access(drive, folder_id):
     return meta.get("driveId")
 
 # =========================
-# 크롤러 (requests + BeautifulSoup)
+# 크롤러 (requests + bs4)
 # =========================
 HEADERS = {
     "User-Agent": (
@@ -153,122 +145,163 @@ def _new_session() -> requests.Session:
         total=3,
         backoff_factor=0.8,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "HEAD"])
+        allowed_methods=frozenset(["GET", "HEAD"]),
     )
     s.mount("https://", HTTPAdapter(max_retries=retries))
     s.mount("http://", HTTPAdapter(max_retries=retries))
     return s
 
 def _extract_company_from_onclick(li) -> str | None:
-    btn = li.select_one('button.btnScrap')
+    btn = li.select_one("button.btnScrap")
     if not btn:
         return None
-    onclick = btn.get('onclick') or ''
+    onclick = btn.get("onclick") or ""
     literals = re.findall(r"'([^']*)'", onclick)
     if not literals:
         return None
-    payload = html.unescape(literals[-1])  # "_회사명_제목..."
-    payload = payload.replace('<BR>', ' ').replace('&lt;BR&gt;', ' ').lstrip('_').strip()
-    if '_' in payload:
-        company = payload.split('_', 1)[0].strip()
+    payload = html.unescape(literals[-1])  # "_회사명_제목"
+    payload = payload.replace("<BR>", " ").replace("&lt;BR&gt;", " ").lstrip("_").strip()
+    if "_" in payload:
+        company = payload.split("_", 1)[0].strip()
         return company or None
     return None
 
+def _first_valid_href(anchors):
+    for a in anchors:
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        low = href.lower()
+        if low.startswith("javascript") or href in ("#", "/#"):
+            continue
+        if low.startswith("http") or href.startswith("/"):
+            return href
+    return ""
+
 def _extract_job_url(li) -> str:
     """
-    URL 추출 우선순위:
-      1) <a.card-wrap href> (javascript/빈값 제외)
-      2) <a.card-wrap data-linkurl>
-      3) <a.card-wrap data-gno> → /Recruit/GI_Read/{gno}
-      4) <li data-match> JSON의 gno → /Recruit/GI_Read/{gno}
+    URL 추출 우선순위(확장판):
+      1) a.card-wrap[href] (javascript 제외)
+      2) a.card-wrap[data-linkurl]
+      3) div.description a[href]
+      4) div.company .name a[href]
+      5) li 내부 첫 번째 유효한 a[href]
+      6) a.card-wrap[data-gno] → /Recruit/GI_Read/{gno}
+      7) li[data-match] JSON의 gno → /Recruit/GI_Read/{gno}
+      8) li[dmp-collection] JSON의 recruitNo → /Recruit/GI_Read/{recruitNo}
     """
-    a = li.select_one('a.card-wrap')
-    href = (a.get('href') or '').strip() if a else ''
-    # 1) href
-    if href and not href.lower().startswith('javascript'):
-        return _fix_url(href)
-    # 2) data-linkurl
+    a = li.select_one("a.card-wrap")
     if a:
-        dlink = (a.get('data-linkurl') or '').strip()
+        href = (a.get("href") or "").strip()
+        if href and not href.lower().startswith("javascript"):
+            return _fix_url(href)
+        dlink = (a.get("data-linkurl") or "").strip()
         if dlink:
             return _fix_url(dlink)
-        gno = (a.get('data-gno') or '').strip()
+
+    # 3~5: 다양한 레이아웃의 직접 링크
+    for sel in ("div.description a", "div.company .name a"):
+        cand = li.select_one(sel)
+        if cand:
+            href = _first_valid_href([cand])
+            if href:
+                return _fix_url(href)
+    any_href = _first_valid_href(li.select("a[href]"))
+    if any_href:
+        return _fix_url(any_href)
+
+    # 6~7: gno / data-match
+    if a:
+        gno = (a.get("data-gno") or "").strip()
         if gno:
             return _fix_url(f"/Recruit/GI_Read/{gno}")
-    # 4) li[data-match]
-    dm = li.get('data-match')
+    dm = li.get("data-match")
     if dm:
         try:
-            gno = json.loads(html.unescape(dm)).get('gno')
+            gno = json.loads(html.unescape(dm)).get("gno")
             if gno:
                 return _fix_url(f"/Recruit/GI_Read/{gno}")
         except Exception:
             pass
-    return 'No URL'
+
+    # 8: dmp-collection의 recruitNo
+    dmp = li.get("dmp-collection")
+    if dmp:
+        try:
+            obj = json.loads(html.unescape(dmp))
+            rec = obj.get("recruitNo")
+            if rec:
+                return _fix_url(f"/Recruit/GI_Read/{rec}")
+        except Exception:
+            pass
+
+    return "No URL"
 
 def _fetch_company_from_detail(session: requests.Session, job_url: str) -> str | None:
-    if not job_url or job_url == 'No URL':
+    if not job_url or job_url == "No URL":
         return None
     try:
         res = session.get(_fix_url(job_url), timeout=15)
         res.raise_for_status()
-        soup = BeautifulSoup(res.text, 'lxml')
+        soup = BeautifulSoup(res.text, "lxml")
         cand = (
-            soup.select_one('.coName a') or
-            soup.select_one('.coTit a') or
-            soup.select_one('a.coLink') or
-            soup.select_one('.company .name') or
-            soup.select_one('meta[property="og:site_name"]')
+            soup.select_one(".coName a")
+            or soup.select_one(".coTit a")
+            or soup.select_one("a.coLink")
+            or soup.select_one(".company .name")
+            or soup.select_one('meta[property="og:site_name"]')
         )
         if cand:
             return (cand.get_text(strip=True)
-                    if hasattr(cand, 'get_text')
-                    else cand.get('content', '').strip()) or None
+                    if hasattr(cand, "get_text")
+                    else cand.get("content", "").strip()) or None
     except Exception:
         pass
     return None
 
 def scrape_job_postings() -> pd.DataFrame:
     session = _new_session()
-    resp = session.get(BASE_URL + '/', timeout=20)
+    resp = session.get(BASE_URL + "/", timeout=20)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'lxml')
+    soup = BeautifulSoup(resp.text, "lxml")
 
-    section = soup.select_one('#Prdt_BnnrFirstVVIP')
+    section = soup.select_one("#Prdt_BnnrFirstVVIP")
     if not section:
-        raise RuntimeError("First VVIP 섹션(#Prdt_BnnrFirstVVIP)을 찾지 못했습니다. 마크업이 변경되었을 수 있습니다.")
+        raise RuntimeError("First VVIP 섹션(#Prdt_BnnrFirstVVIP)을 찾지 못했습니다.")
 
-    items = section.select('ul.list_firstvvip > li')
+    items = section.select("ul.list_firstvvip > li")
     if not items:
         print("경고: list_firstvvip 항목이 비었습니다.")
 
-    data = []
+    rows = []
     for li in items:
         job_url = _extract_job_url(li)
-        title = _text(li.select_one('div.description')) or 'No Title'
-        summary = _text(li.select_one('div.addition div.summary')) or 'No Summary'
-        dday = _text(li.select_one('div.extra .dday')) or 'No D-Day'
-        logo_img = li.select_one('span.logo img')
-        logo_url = _fix_url(logo_img.get('src')) if logo_img and logo_img.get('src') else 'No Logo URL'
+        title = _text(li.select_one("div.description")) or "No Title"
+        summary = _text(li.select_one("div.addition .summary")) or "No Summary"
+        dday = _text(li.select_one("div.extra .dday")) or "No D-Day"
+        logo_img = li.select_one("span.logo img")
+        logo_url = _fix_url(logo_img.get("src")) if logo_img and logo_img.get("src") else "No Logo URL"
 
         company = _extract_company_from_onclick(li)
-        if not company and job_url and job_url != 'No URL':
+        if not company and job_url and job_url != "No URL":
             company = _fetch_company_from_detail(session, job_url)
         if not company:
-            company = 'No Company Name'
+            company = "No Company Name"
 
-        data.append({
-            'Company Name': company,
-            'Logo URL': logo_url,
-            'Job Title': title,
-            'Job Summary': summary,
-            'D-Day': dday,
-            'Job URL': job_url,
-            'Scraped Date': datetime.now().strftime("%Y-%m-%d")
-        })
+        rows.append(
+            {
+                "Company Name": company,
+                "Logo URL": logo_url,
+                "Job Title": title,
+                "Job Summary": summary,
+                "D-Day": dday,
+                "Job URL": job_url,
+                "Scraped Date": datetime.now().strftime("%Y-%m-%d"),
+            }
+        )
 
-    print(f"총 {len(data)}개의 채용 공고를 수집했습니다.")
-    return pd.DataFrame(data)
+    print(f"총 {len(rows)}개의 채용 공고를 수집했습니다.")
+    return pd.DataFrame(rows)
 
 # =========================
 # 메인
@@ -279,15 +312,19 @@ def main():
 
     query = f"name='{CSV_FILE_NAME}' and '{GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed=false"
     resp = drive.files().list(
-        q=query, spaces='drive', fields='files(id, name)',
-        includeItemsFromAllDrives=True, supportsAllDrives=True,
-        corpora='drive', driveId=drive_id
+        q=query,
+        spaces="drive",
+        fields="files(id,name)",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        corpora="drive",
+        driveId=drive_id,
     ).execute()
-    files = resp.get('files', [])
+    files = resp.get("files", [])
 
     existing_df, file_id = pd.DataFrame(), None
     if files:
-        file_id = files[0]['id']
+        file_id = files[0]["id"]
         print(f"기존 파일 '{CSV_FILE_NAME}' (ID: {file_id}) 발견 → 다운로드")
         request = drive.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -304,21 +341,22 @@ def main():
     new_df = scrape_job_postings()
 
     combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-    combined_df.drop_duplicates(subset=['Job URL', 'Job Title'], keep='last', inplace=True)
+    combined_df.drop_duplicates(subset=["Job URL", "Job Title"], keep="last", inplace=True)
     print(f"병합/중복 제거 후 총 {len(combined_df)}개 레코드.")
 
-    csv_bytes = combined_df.to_csv(index=False).encode('utf-8-sig')
-    media_body = MediaIoBaseUpload(io.BytesIO(csv_bytes), mimetype='text/csv', resumable=False)
+    csv_bytes = combined_df.to_csv(index=False).encode("utf-8-sig")
+    media_body = MediaIoBaseUpload(io.BytesIO(csv_bytes), mimetype="text/csv", resumable=False)
 
     if file_id:
         drive.files().update(fileId=file_id, media_body=media_body, supportsAllDrives=True).execute()
         print(f"파일 ID {file_id} 업데이트 완료.")
     else:
-        file_metadata = {'name': CSV_FILE_NAME, 'parents': [GOOGLE_DRIVE_FOLDER_ID]}
+        file_metadata = {"name": CSV_FILE_NAME, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
         created = drive.files().create(
-            body=file_metadata, media_body=media_body, fields='id', supportsAllDrives=True
+            body=file_metadata, media_body=media_body, fields="id", supportsAllDrives=True
         ).execute()
         print(f"폴더 {GOOGLE_DRIVE_FOLDER_ID}에 새 파일 업로드 완료 (ID: {created.get('id')}).")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+
