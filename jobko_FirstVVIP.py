@@ -1,11 +1,6 @@
 # filename: jobko_FirstVVIP.py
-import os
-import io
-import re
-import json
-import html
-import base64
-from urllib.parse import urljoin
+import os, io, re, json, html, base64
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from datetime import datetime
 
 import pandas as pd
@@ -48,6 +43,14 @@ def _fix_url(u: str, base: str = BASE_URL) -> str:
     if u.startswith("/"):
         return urljoin(base, u)
     return u
+
+def _strip_query(u: str) -> str:
+    if not u:
+        return u
+    parts = list(urlsplit(u))
+    parts[3] = ""  # query
+    parts[4] = ""  # fragment
+    return urlunsplit(parts)
 
 def _text(node) -> str:
     return node.get_text(" ", strip=True) if node else ""
@@ -136,11 +139,13 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 def _new_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(HEADERS)
+    s.headers["Referer"] = BASE_URL + "/"  # 홈 → 상세
     retries = Retry(
         total=3,
         backoff_factor=0.8,
@@ -159,7 +164,7 @@ def _extract_company_from_onclick(li) -> str | None:
     literals = re.findall(r"'([^']*)'", onclick)
     if not literals:
         return None
-    payload = html.unescape(literals[-1])  # "_회사명_제목"
+    payload = html.unescape(literals[-1])
     payload = payload.replace("<BR>", " ").replace("&lt;BR&gt;", " ").lstrip("_").strip()
     if "_" in payload:
         company = payload.split("_", 1)[0].strip()
@@ -179,17 +184,6 @@ def _first_valid_href(anchors):
     return ""
 
 def _extract_job_url(li) -> str:
-    """
-    URL 추출 우선순위(확장판):
-      1) a.card-wrap[href] (javascript 제외)
-      2) a.card-wrap[data-linkurl]
-      3) div.description a[href]
-      4) div.company .name a[href]
-      5) li 내부 첫 번째 유효한 a[href]
-      6) a.card-wrap[data-gno] → /Recruit/GI_Read/{gno}
-      7) li[data-match] JSON의 gno → /Recruit/GI_Read/{gno}
-      8) li[dmp-collection] JSON의 recruitNo → /Recruit/GI_Read/{recruitNo}
-    """
     a = li.select_one("a.card-wrap")
     if a:
         href = (a.get("href") or "").strip()
@@ -213,6 +207,7 @@ def _extract_job_url(li) -> str:
         gno = (a.get("data-gno") or "").strip()
         if gno:
             return _fix_url(f"/Recruit/GI_Read/{gno}")
+
     dm = li.get("data-match")
     if dm:
         try:
@@ -239,17 +234,10 @@ DT_LABELS_COMPANY_TYPE = ("기업형태", "기업 형태", "기업구분", "기�
 DT_LABELS_EMPLOYEES    = ("사원수", "임직원수", "임직원 수")
 
 def _parse_dt_dd_map(soup: BeautifulSoup) -> dict:
-    """
-    상세 하단 요약정보의 dt/dd를 맵으로 변환.
-    여러 형태를 고려하여 페이지 전체에서 dt/dd를 스캔합니다.
-    """
     mapping = {}
-
-    # 후보 dl 영역들: 표준, 변형 모두 커버
     dls = soup.select("article.artReadCoInfo dl, .artReadCoInfo dl, dl.tbList, .coInfo dl")
     if not dls:
-        dls = soup.select("dl")  # 최후의 폴백
-
+        dls = soup.select("dl")
     for dl in dls:
         for dt in dl.find_all("dt"):
             key = dt.get_text(" ", strip=True).replace(":", "")
@@ -261,23 +249,63 @@ def _parse_dt_dd_map(soup: BeautifulSoup) -> dict:
                 mapping[key] = {"dd": dd, "text": val}
     return mapping
 
+def _parse_company_fields_from_mapping(mapping: dict) -> tuple[str|None, str|None]:
+    company_type = None
+    employee_cnt = None
+
+    for label in DT_LABELS_COMPANY_TYPE:
+        m = mapping.get(label)
+        if m:
+            company_type = m["text"]
+            break
+
+    for label in DT_LABELS_EMPLOYEES:
+        m = mapping.get(label)
+        if m:
+            dd = m["dd"]
+            span = dd.select_one("span.tahoma")
+            if span and span.get_text(strip=True):
+                employee_cnt = span.get_text(strip=True)
+            else:
+                mnum = re.search(r"[\d,]+", m["text"])
+                if mnum:
+                    employee_cnt = mnum.group(0)
+            break
+
+    return company_type, employee_cnt
+
+def _find_company_info_link(soup: BeautifulSoup) -> str | None:
+    # “기업정보” 버튼
+    a = soup.select_one(".coInfo .coBtn a.girBtn_3, a.girBtn.girBtn_3")
+    if a and a.get("href"):
+        return _fix_url(a["href"])
+    # 일반 company 링크
+    a = soup.select_one('a[href*="/Company/"]')
+    if a and a.get("href"):
+        return _fix_url(a["href"])
+    return None
+
 def _fetch_detail_info(session: requests.Session, job_url: str) -> dict:
-    """
-    상세 페이지에서 회사명, 기업형태, 사원수(.tahoma) 추출
-    """
     info = {"company_name": None, "company_type": None, "employee_count": None}
     if not job_url or job_url == "No URL":
         return info
 
+    # 1) 공고 상세 페이지
     try:
-        res = session.get(_fix_url(job_url), timeout=15)
+        res = session.get(_fix_url(job_url), timeout=20, allow_redirects=True)
         res.raise_for_status()
     except Exception:
-        return info
+        # 쿼리 제거 버전 재시도(일부 페이지에서 파라미터 민감)
+        try:
+            plain = _strip_query(_fix_url(job_url))
+            res = session.get(plain, timeout=20)
+            res.raise_for_status()
+        except Exception:
+            return info
 
     soup = BeautifulSoup(res.text, "lxml")
 
-    # 회사명 후보
+    # 회사명
     cand = (
         soup.select_one(".coName a")
         or soup.select_one(".coTit a")
@@ -290,36 +318,40 @@ def _fetch_detail_info(session: requests.Session, job_url: str) -> dict:
             cand.get_text(strip=True) if hasattr(cand, "get_text") else cand.get("content", "").strip()
         ) or None
 
-    # dt/dd 매핑
+    # 요약정보 추출
     mapping = _parse_dt_dd_map(soup)
+    ctype, ecnt = _parse_company_fields_from_mapping(mapping)
+    info["company_type"] = ctype
+    info["employee_count"] = ecnt
 
-    # 기업형태
-    for label in DT_LABELS_COMPANY_TYPE:
-        m = mapping.get(label)
-        if m:
-            # dd 안의 깔끔한 텍스트(괄호 표기 포함)
-            info["company_type"] = m["text"]
-            break
+    # 2) 부족하면 “기업정보” 서브페이지에서 재시도
+    if not (info["company_type"] and info["employee_count"]):
+        link = _find_company_info_link(soup)
+        if link:
+            try:
+                # 상세 → 기업정보 이동 시 referer를 상세로 설정
+                res2 = session.get(link, timeout=20, headers={"Referer": _fix_url(job_url)})
+                res2.raise_for_status()
+                soup2 = BeautifulSoup(res2.text, "lxml")
 
-    # 사원수(.tahoma)
-    for label in DT_LABELS_EMPLOYEES:
-        m = mapping.get(label)
-        if m:
-            dd = m["dd"]
-            span = dd.select_one("span.tahoma")
-            if span and span.get_text(strip=True):
-                info["employee_count"] = span.get_text(strip=True)
-            else:
-                # 숫자 폴백(천단위 콤마 포함)
-                mnum = re.search(r"[\d,]+", m["text"])
-                if mnum:
-                    info["employee_count"] = mnum.group(0)
-            break
+                # 회사명 보정
+                if not info["company_name"]:
+                    h = soup2.select_one(".coTit, .coName, .company .name, h1, h3")
+                    if h:
+                        info["company_name"] = _text(h)
+
+                mapping2 = _parse_dt_dd_map(soup2)
+                ctype2, ecnt2 = _parse_company_fields_from_mapping(mapping2)
+                if not info["company_type"] and ctype2:
+                    info["company_type"] = ctype2
+                if not info["employee_count"] and ecnt2:
+                    info["employee_count"] = ecnt2
+            except Exception:
+                pass
 
     return info
 
 # --------------------------------------
-
 def scrape_job_postings() -> pd.DataFrame:
     session = _new_session()
     resp = session.get(BASE_URL + "/", timeout=20)
@@ -343,10 +375,8 @@ def scrape_job_postings() -> pd.DataFrame:
         logo_img = li.select_one("span.logo img")
         logo_url = _fix_url(logo_img.get("src")) if logo_img and logo_img.get("src") else "No Logo URL"
 
-        # 회사명 우선: onclick → 상세 페이지
         company = _extract_company_from_onclick(li)
 
-        # 상세 페이지에서 회사명/기업형태/사원수 동시 수집
         detail = _fetch_detail_info(session, job_url)
         company = company or detail.get("company_name") or "No Company Name"
         company_type = detail.get("company_type") or "No Company Type"
@@ -361,7 +391,7 @@ def scrape_job_postings() -> pd.DataFrame:
                 "D-Day": dday,
                 "Job URL": job_url,
                 "Company Type": company_type,
-                "Employee Count": employee_cnt,   # span.tahoma 값(없으면 숫자 폴백)
+                "Employee Count": employee_cnt,
                 "Scraped Date": datetime.now().strftime("%Y-%m-%d"),
             }
         )
