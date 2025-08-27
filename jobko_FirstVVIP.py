@@ -1,5 +1,5 @@
 # filename: jobko_FirstVVIP.py
-import os, io, re, json, html, base64
+import os, io, re, json, html, base64, time, random
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from datetime import datetime
 
@@ -140,17 +140,18 @@ HEADERS = {
     ),
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Connection": "keep-alive",
 }
 
 def _new_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(HEADERS)
-    s.headers["Referer"] = BASE_URL + "/"  # 홈 → 상세
     retries = Retry(
         total=3,
-        backoff_factor=0.8,
+        backoff_factor=0.6,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET", "HEAD"]),
+        raise_on_status=False,
     )
     s.mount("https://", HTTPAdapter(max_retries=retries))
     s.mount("http://", HTTPAdapter(max_retries=retries))
@@ -184,6 +185,7 @@ def _first_valid_href(anchors):
     return ""
 
 def _extract_job_url(li) -> str:
+    # 선호 순서: card-wrap → description a → company a → 임의 a → data-gno → dmp-collection.recruitNo
     a = li.select_one("a.card-wrap")
     if a:
         href = (a.get("href") or "").strip()
@@ -199,15 +201,18 @@ def _extract_job_url(li) -> str:
             href = _first_valid_href([cand])
             if href:
                 return _fix_url(href)
-    any_href = _first_valid_href(li.select("a[href]"))
+
+    any_href = _first_valid_href(li.select("div.description a, div.company .name a, a[href]"))
     if any_href:
         return _fix_url(any_href)
 
-    if a:
-        gno = (a.get("data-gno") or "").strip()
-        if gno:
+    # data-gno
+    for attr in ("data-gno",):
+        gno = (li.get(attr) or "").strip()
+        if gno.isdigit():
             return _fix_url(f"/Recruit/GI_Read/{gno}")
 
+    # data-match
     dm = li.get("data-match")
     if dm:
         try:
@@ -217,6 +222,7 @@ def _extract_job_url(li) -> str:
         except Exception:
             pass
 
+    # dmp-collection
     dmp = li.get("dmp-collection")
     if dmp:
         try:
@@ -227,7 +233,7 @@ def _extract_job_url(li) -> str:
         except Exception:
             pass
 
-    return "No URL"
+    return ""  # 못 찾으면 빈 문자열(→ 스킵)
 
 # ---------- 상세 페이지 파서 ----------
 DT_LABELS_COMPANY_TYPE = ("기업형태", "기업 형태", "기업구분", "기업 구분")
@@ -235,10 +241,11 @@ DT_LABELS_EMPLOYEES    = ("사원수", "임직원수", "임직원 수")
 
 def _parse_dt_dd_map(soup: BeautifulSoup) -> dict:
     mapping = {}
-    dls = soup.select("article.artReadCoInfo dl, .artReadCoInfo dl, dl.tbList, .coInfo dl")
-    if not dls:
-        dls = soup.select("dl")
-    for dl in dls:
+    # 스코프를 요약 블록으로 한정
+    scopes = soup.select("article.artReadCoInfo dl, .artReadCoInfo dl, .coInfo dl, dl.tbList")
+    if not scopes:
+        scopes = soup.select("dl")
+    for dl in scopes:
         for dt in dl.find_all("dt"):
             key = dt.get_text(" ", strip=True).replace(":", "")
             dd = dt.find_next_sibling("dd")
@@ -275,11 +282,9 @@ def _parse_company_fields_from_mapping(mapping: dict) -> tuple[str|None, str|Non
     return company_type, employee_cnt
 
 def _find_company_info_link(soup: BeautifulSoup) -> str | None:
-    # “기업정보” 버튼
     a = soup.select_one(".coInfo .coBtn a.girBtn_3, a.girBtn.girBtn_3")
     if a and a.get("href"):
         return _fix_url(a["href"])
-    # 일반 company 링크
     a = soup.select_one('a[href*="/Company/"]')
     if a and a.get("href"):
         return _fix_url(a["href"])
@@ -287,18 +292,18 @@ def _find_company_info_link(soup: BeautifulSoup) -> str | None:
 
 def _fetch_detail_info(session: requests.Session, job_url: str) -> dict:
     info = {"company_name": None, "company_type": None, "employee_count": None}
-    if not job_url or job_url == "No URL":
+    if not job_url:
         return info
 
-    # 1) 공고 상세 페이지
+    # 상세
     try:
-        res = session.get(_fix_url(job_url), timeout=20, allow_redirects=True)
+        res = session.get(_fix_url(job_url), timeout=18, headers={"Referer": BASE_URL + "/"})
         res.raise_for_status()
     except Exception:
-        # 쿼리 제거 버전 재시도(일부 페이지에서 파라미터 민감)
+        # 쿼리 제거 버전 재시도
         try:
             plain = _strip_query(_fix_url(job_url))
-            res = session.get(plain, timeout=20)
+            res = session.get(plain, timeout=18, headers={"Referer": BASE_URL + "/"})
             res.raise_for_status()
         except Exception:
             return info
@@ -309,7 +314,6 @@ def _fetch_detail_info(session: requests.Session, job_url: str) -> dict:
     cand = (
         soup.select_one(".coName a")
         or soup.select_one(".coTit a")
-        or soup.select_one("a.coLink")
         or soup.select_one(".coInfo h4")
         or soup.select_one('meta[property="og:site_name"]')
     )
@@ -318,28 +322,23 @@ def _fetch_detail_info(session: requests.Session, job_url: str) -> dict:
             cand.get_text(strip=True) if hasattr(cand, "get_text") else cand.get("content", "").strip()
         ) or None
 
-    # 요약정보 추출
     mapping = _parse_dt_dd_map(soup)
     ctype, ecnt = _parse_company_fields_from_mapping(mapping)
-    info["company_type"] = ctype
+    info["company_type"]  = ctype
     info["employee_count"] = ecnt
 
-    # 2) 부족하면 “기업정보” 서브페이지에서 재시도
+    # 보강: 기업정보 서브페이지
     if not (info["company_type"] and info["employee_count"]):
         link = _find_company_info_link(soup)
         if link:
             try:
-                # 상세 → 기업정보 이동 시 referer를 상세로 설정
-                res2 = session.get(link, timeout=20, headers={"Referer": _fix_url(job_url)})
+                res2 = session.get(link, timeout=18, headers={"Referer": _fix_url(job_url)})
                 res2.raise_for_status()
                 soup2 = BeautifulSoup(res2.text, "lxml")
-
-                # 회사명 보정
                 if not info["company_name"]:
                     h = soup2.select_one(".coTit, .coName, .company .name, h1, h3")
                     if h:
                         info["company_name"] = _text(h)
-
                 mapping2 = _parse_dt_dd_map(soup2)
                 ctype2, ecnt2 = _parse_company_fields_from_mapping(mapping2)
                 if not info["company_type"] and ctype2:
@@ -354,6 +353,7 @@ def _fetch_detail_info(session: requests.Session, job_url: str) -> dict:
 # --------------------------------------
 def scrape_job_postings() -> pd.DataFrame:
     session = _new_session()
+    # 홈(쿠키/리퍼러 생성)
     resp = session.get(BASE_URL + "/", timeout=20)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "lxml")
@@ -363,22 +363,38 @@ def scrape_job_postings() -> pd.DataFrame:
         raise RuntimeError("First VVIP 섹션(#Prdt_BnnrFirstVVIP)을 찾지 못했습니다.")
 
     items = section.select("ul.list_firstvvip > li")
+    total_li = len(items)
     if not items:
         print("경고: list_firstvvip 항목이 비었습니다.")
 
     rows = []
+    skipped = 0
+    ok_detail = 0
+    miss_detail = 0
+
     for li in items:
         job_url = _extract_job_url(li)
+        if not job_url:
+            skipped += 1
+            continue  # 실제 공고 카드가 아님
+
         title = _text(li.select_one("div.description")) or "No Title"
         summary = _text(li.select_one("div.addition .summary")) or "No Summary"
         dday = _text(li.select_one("div.extra .dday")) or "No D-Day"
         logo_img = li.select_one("span.logo img")
         logo_url = _fix_url(logo_img.get("src")) if logo_img and logo_img.get("src") else "No Logo URL"
 
-        company = _extract_company_from_onclick(li)
+        company_from_list = _extract_company_from_onclick(li)
 
+        # 상세 보강
+        time.sleep(random.uniform(0.5, 1.1))  # 연속요청 완화
         detail = _fetch_detail_info(session, job_url)
-        company = company or detail.get("company_name") or "No Company Name"
+        if detail.get("company_type") or detail.get("employee_count"):
+            ok_detail += 1
+        else:
+            miss_detail += 1
+
+        company = company_from_list or detail.get("company_name") or "No Company Name"
         company_type = detail.get("company_type") or "No Company Type"
         employee_cnt = detail.get("employee_count") or "No Employee Count"
 
@@ -396,7 +412,9 @@ def scrape_job_postings() -> pd.DataFrame:
             }
         )
 
-    print(f"총 {len(rows)}개의 채용 공고를 수집했습니다.")
+    print(f"목록 li 개수: {total_li} / 스킵(비카드): {skipped}")
+    print(f"상세 파싱 성공: {ok_detail} / 부족: {miss_detail}")
+    print(f"최종 수집: {len(rows)}")
     return pd.DataFrame(rows)
 
 # =========================
